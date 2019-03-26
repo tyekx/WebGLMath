@@ -4,6 +4,43 @@
  * @copyright Laszlo Szecsi 2019
  */
 "use strict";
+
+function StructProxy() {
+  // empty "class" for type-checking
+}
+
+function ArrayProxy() {
+  // double $ is the angular-way of saying private
+  this.$$storage = {};
+  this.$$size = 0;
+
+  // needed because of the GLSL way of handling uniforms, we must deduce the size of an ArrayProxy manually
+  this.insert = (newIndex) => {
+    if(!this.$$storage.hasOwnProperty(newIndex)) {
+      if(this.$$size <= newIndex) {
+        this.$$size = newIndex+1;
+      }
+      this.$$storage[newIndex] = {};
+    }
+  }
+
+  this.getSize = () => {
+    return this.$$size;
+  }
+
+  this.at = (i) => {
+    if(i >= 0 && i < this.$$size) {
+      return this.$$storage[i];
+    }
+    // overindexed
+    return null;
+  };
+
+  this.getKeys = () => {
+    return Object.keys(this.$$storage);
+  };
+}
+
 /**
  * @class UniformReflection
  * @classdesc A collection of static factory methods that return WebGLMath objects reflecting WebGL uniforms.
@@ -11,84 +48,98 @@
  * It also offers the static addProperties method to automate populating objects with reflected uniforms.
  */
 const UniformReflection = {
-  /**
-   * @method addProperties
-   * @memberof UniformReflection
-   * @static 
-   * @description Populates a target object (or objects) with reflection properties matching the uniforms in a WebGL program.
-   * @param {WebGLRenderingContext} gl - The rendering context.
-   * @param {WebGLProgram} glProgram - The WebGL program whose active uniforms are to be reflected.
-   * @param {Object} target - The object to gain the properties matching uniforms that are not defined in structs.
-   * @param {Object} [structTargets = window.Uniforms] - For uniforms defined in structs, the reflection property is added to structTargets[<struct name>], which must be an Object, or undefined, in which case a new object is created.
-   * @return {Proxy} - The target object wrapped in a proxy that only prints a warning on accessing non-existent properties.
-   */  
-  addProperties : function(gl, glProgram, target, structTargets){
-    if(!structTargets) { // set default, create it if necessary
-      if(!("Uniforms" in window)){ window.Uniforms = UniformReflection.makeProxy({},"uniform struct");}
-      structTargets = window.Uniforms;
-    }
-    // for all uniforms used in glProgram
+  addProperties: function(gl, glProgram, target) {
     const nUniforms = gl.getProgramParameter(glProgram, gl.ACTIVE_UNIFORMS);
-    for(let i=0; i<nUniforms; i++){ 
-      const glUniform = gl.getActiveUniform(glProgram, i); 
-      // create an object of approriate type
-      const reflectionVariable = 
-          UniformReflection.makeVar(gl, glUniform.type, glUniform.size || 1);
-      // separate struct name (if exists) and unqualified uniform name
-      const nameParts = glUniform.name.split('[')[0].split('.');
-      const uniformName = nameParts[nameParts.length - 1];
-      const structName = nameParts[nameParts.length - 2];      
+    for(let i = 0; i < nUniforms; ++i) {
+      const glUniform = gl.getActiveUniform(glProgram, i);
 
-      let t = target; // uniform should be reflected in target, by default
-      if(structName) { // except if it is defined in a struct
-        if(!(structName in structTargets)) { // add a reflection object for the struct
-          Object.defineProperty(structTargets, structName, {value: UniformReflection.makeProxy({})} );
+      const reflectionCtor = () => { return UniformReflection.makeVar(gl, glUniform.type, glUniform.size || 1) };
+      // this handles the struct depth, we always reset it to target after every property
+      var depthIter = target;
+      // split by each struct entity
+      const nameParts = glUniform.name.split('.');
+      // foreach namepart we try to build the same layout in the "target" variable
+      for(let j = 0; j < nameParts.length; ++j) {
+        // try checking if its an array
+        const bracketSplit = nameParts[j].split('[');
+        // get the actual property name
+        const propertyName = bracketSplit[0];
+        // get the index if there is one
+        let index = null;
+        if(bracketSplit.length > 1) {
+          index = Number(bracketSplit[1].replace("]", ""));
         }
-        t = structTargets[structName]; // uniform defined in struct should be reflected here
-      }
-      if(uniformName in t){ // if reflection property already exists, check compatibility
-        if(t[uniformName].constructor !== reflectionVariable.constructor ||
-          t[uniformName].storage.length !== reflectionVariable.storage.length){
-          throw new Error("Trying to reflect incompatible uniforms both called " + uniformName + "to the same target object.");
+        // check if we have a proxy already at the current depth
+        if(!depthIter.hasOwnProperty(propertyName)) {
+          // if we dont have a property with the name, we create it after a few checks
+
+          // are we at the leaf item? If so we have to insert the proper GLSL data structure
+          if(j == nameParts.length - 1) {
+            // here we do not need to handle the array case, because its handled by the UniformReflectionFactories.js
+            // if its a vec4 array for example, then it'll create the corresponding type there (Vec4Array)
+            Object.defineProperty(depthIter, propertyName, { value: reflectionCtor() });
+          } else {
+            // if its not a leaf item however, we will have to continue building our data structure
+            if(index !== null) {
+              // insert an array proxy, which has an indexing operator and a size
+              Object.defineProperty(depthIter, propertyName, { value: new ArrayProxy() });
+            } else {
+              // insert an empty object with a comparable type (if instanceof StructProxy)
+              Object.defineProperty(depthIter, propertyName, { value: new StructProxy() });
+            }
+          }
         }
-      } else {
-        Object.defineProperty(t, uniformName, {value: reflectionVariable} );
+        // progressing to the next depth, if its an array we need to progress using the 0th index
+        if(depthIter[propertyName] instanceof ArrayProxy) {
+          depthIter[propertyName].insert(index);
+          depthIter = depthIter[propertyName].at(index);
+        } else depthIter = depthIter[propertyName];
       }
+
     }
-
+    
     return UniformReflection.makeProxy(target);
   },
-  /**
-   * @method commitProperties
-   * @memberof UniformReflection
-   * @static 
-   * @description Commits the reflection properties of a source object (or objects) matching the uniforms in a given WebGL program.
-   * @param {WebGLRenderingContext} gl - The rendering context.
-   * @param {WebGLProgram} glProgram - The WebGL program whose active uniforms are to be set.
-   * @param {Object} source - The object whose properties should be committed to the uniforms that were not defined in structs.
-   * @param {Object} [structSources = window.Uniforms] - For uniforms defined in structs, the properties of structSources[<struct name>] are committed.
-   */  
-  commitProperties : function(gl, glProgram, source, structSources){
-    structSources = structSources || window.Uniforms;
+  $$recursiveCommit: function(depthIter, nameParts, ni, glUniform, gl, glProgram, constTextureCount) {
+    const bracketSplit = nameParts[ni].split('[');
+    // get the actual property name
+    const propertyName = bracketSplit[0];
+
+    if(depthIter.hasOwnProperty(propertyName)) {
+      // check if its an arrayproxy
+      if(depthIter[propertyName] instanceof ArrayProxy) {
+        const keys = depthIter[propertyName].getKeys();
+        const index = Number(bracketSplit[1].replace("]",""));
+        // if so, we need to iterate through all
+        const io = keys.indexOf(index);
+        if(io != -1) {
+          UniformReflection.$$recursiveCommit(depthIter[propertyName].at(io), nameParts, ni + 1, glUniform, gl, glProgram, constTextureCount);
+        } // else return
+      }
+
+      if(ni == nameParts.length - 1) {
+        // we wont need to index at the leaf, since it'll be saved as Vec4Array with a size inside
+        const location = gl.getUniformLocation(glProgram, glUniform.name);
+        depthIter[propertyName].commit(gl, location, constTextureCount);
+      } else {
+        UniformReflection.$$recursiveCommit(depthIter[propertyName], nameParts, ni + 1, glUniform, gl, glProgram, constTextureCount);
+      }
+    } // else return
+  },
+  commitProperties: function(gl, glProgram, target) {
+    const nUniforms = gl.getProgramParameter(glProgram, gl.ACTIVE_UNIFORMS);
     let textureUnitCount = 0;
-    // for all uniforms used in glProgram
-    const nUniforms = gl.getProgramParameter(glProgram, gl.ACTIVE_UNIFORMS); 
-    for(let i=0; i<nUniforms; i++){ 
-      const glUniform = gl.getActiveUniform(glProgram, i); 
-      // keep track of texture units used
+    for(let i = 0; i < nUniforms; ++i) {
+      const glUniform = gl.getActiveUniform(glProgram, i);
+      
       if(glUniform.type === gl.SAMPLER_2D || glUniform.type === gl.SAMPLER_CUBE){ 
         textureUnitCount += glUniform.size || 1; 
       }
-      // separate struct name (if exists) and unqualified uniform name
-      const nameParts = glUniform.name.split('[')[0].split('.');
-      const uniformName = nameParts[nameParts.length - 1];
-      const structName = nameParts[nameParts.length - 2];      
-      // get uniform location and commit reflection property there
-      const location = gl.getUniformLocation(glProgram, glUniform.name);
-      // use struct source instead of source for uniforms defined in structs
-      (structName?structSources[structName]:source)[uniformName].commit(gl, location, textureUnitCount);
+
+      const nameParts = glUniform.name.split('.');
+      UniformReflection.$$recursiveCommit(target, nameParts, 0, glUniform, gl, glProgram, textureUnitCount);
     }
-  },  
+  },
   /**
    * @method makeProxy
    * @memberof UniformReflection

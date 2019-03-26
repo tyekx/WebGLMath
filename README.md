@@ -76,3 +76,65 @@ var randomVector = Vec4.random(); // create a random vector to test that any vec
 var errorVector = randomVector.minus( randomVector.times(m) ); // errorVector <= (0, 0, 0, 0)
 console.table(errorVector);
 ```
+
+### Uniform Reflection
+
+Uniforms can be reflected using the UniformReflection object. To reflect uniforms into an object use the following functions
+
+```javascript
+// adding properties to object
+UniformReflection.addProperties(gl, glProgram, object);
+
+// [R/W object values]
+
+// commiting values
+UniformReflection.commitProperties(gl, glProgram, object);
+```
+
+Adding properties are required once at the initialization time, then updating the values each frame, then commit the changes at the end of the frame.
+
+The reflection works the following way
+
+```c
+// GLSL code
+struct Material {
+    vec4 diffuse;
+    vec3 fresnelR0;
+    float shininess;
+};
+
+uniform Material materials[16];
+```
+
+This can be used the following way in the JS code:
+
+```javascript
+// JS
+// UniformReflection.addProperties(gl, glProgram, traceProgram); happened during initialization
+for(let i = 0; i < traceProgram.materials.getSize(); ++i) {
+  traceProgram.materials.at(i).diffuse.set(new Vec4());
+}
+// commit afterwards
+```
+
+This can be extended to the desired depth
+
+```c
+// GLSL
+struct Foo {
+  float value[16];
+};
+
+struct Bar {
+  Foo foo[16];
+};
+
+uniform Bar bar[16];
+```
+
+```javascript
+traceProgram.bar.at(i).foo.at(j).value.at(k).set(0);
+// commit afterwards
+```
+
+In short, use `at()` function to access arrays, only top level arrays can be bulk updated at this point. In the first example you can not bulk update, in the second example the `value` can be updated with a Vec1Array with a size of 16.
